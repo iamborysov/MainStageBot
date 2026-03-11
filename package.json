@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "googleapis": "^170.0.0",
+    "luxon": "^3.7.2",
+    "node-cron": "^4.2.1",
+    "sqlite3": "^5.1.7",
+    "telegraf": "^4.16.3"
+  }
+}

@@ -27,9 +27,9 @@ async function saveUser(user) {
                 ]]
             },
         });
-        console.log(`✅ [Sheets] Новий користувач ${user.first_name} доданий.`);
+        // console.log(`✅ [Sheets] Новий користувач ${user.first_name} доданий.`);
     } catch (error) {
-        console.error('❌ [Sheets] Помилка запису юзера:', error.message);
+        // console.error('❌ [Sheets] Помилка запису юзера:', error.message);
     }
 }
 
@@ -50,13 +50,13 @@ async function checkAndSaveUser(user) {
 
         // Якщо ID користувача ще немає в списку -> додаємо його
         if (!existingIds.includes(String(user.telegram_id))) {
-            console.log(`👤 Користувача ${user.telegram_id} немає в таблиці. Виправляємо...`);
+            // console.log(`👤 Користувача ${user.telegram_id} немає в таблиці. Виправляємо...`);
             await saveUser(user);
         } else {
             // console.log('Користувач вже є в базі, все ок.');
         }
     } catch (error) {
-        console.error('❌ [Sheets] Помилка перевірки юзера:', error.message);
+        // console.error('❌ [Sheets] Помилка перевірки юзера:', error.message);
     }
 }
 
@@ -81,9 +81,9 @@ async function appendBooking(bookingData) {
                 ]]
             },
         });
-        console.log('✅ [Sheets] Бронь записана.');
+        // console.log('✅ [Sheets] Бронь записана.');
     } catch (error) {
-        console.error('❌ [Sheets] Помилка запису броні:', error.message);
+        // console.error('❌ [Sheets] Помилка запису броні:', error.message);
     }
 }
 

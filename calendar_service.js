@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { google } = require('googleapis');
+const { DateTime } = require('luxon');
 
 // ID календарів для кімнат
 const CALENDAR_IDS = {
@@ -45,7 +46,7 @@ const createEvent = async (roomId, date, slots, userInfo) => {
             resource: event,
         });
 
-        console.log(`✅ Подія створена (${slots.join(', ')}): ${response.data.htmlLink}`);
+        // console.log(`✅ Подія створена (${slots.join(', ')}): ${response.data.htmlLink}`);
         return response.data.id;
     } catch (error) {
         console.error('Error creating Google Calendar event:', error);
@@ -66,7 +67,7 @@ const deleteEvent = async (roomId, eventIds) => {
                     calendarId: calendarId,
                     eventId: id.trim()
                 });
-                console.log(`🗑 Подію видалено: ${id}`);
+                // console.log(`🗑 Подію видалено: ${id}`);
             } catch (e) {
                 console.log(`Failed to delete event ${id}: ${e.message}`);
             }
@@ -98,13 +99,9 @@ const getBusySlots = async (roomId, date) => {
 
         events.forEach(event => {
             if (event.start.dateTime) {
-                const start = new Date(event.start.dateTime);
-                const end = new Date(event.end.dateTime);
-                
-                // Отримуємо години (з врахуванням часового поясу сервера/бота)
-                // Для надійності краще парсити рядок, але getHours зазвичай працює коректно, якщо TZ налаштована
-                let startH = start.getHours();
-                let endH = end.getHours();
+                // Парсимо час з урахуванням київської timezone (незалежно від TZ сервера)
+                let startH = DateTime.fromISO(event.start.dateTime).setZone('Europe/Kiev').hour;
+                let endH = DateTime.fromISO(event.end.dateTime).setZone('Europe/Kiev').hour;
                 
                 // Заповнюємо слоти
                 for (let h = startH; h < endH; h++) {

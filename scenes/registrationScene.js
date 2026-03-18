@@ -2,6 +2,7 @@ const { Scenes, Markup } = require('telegraf');
 const DB = require('../database'); // Тут ../ правильно, бо ми в папці scenes
 const KB = require('../keyboards');
 const Sheets = require('../sheets_service');
+const { notifyAdmins } = require('../utils/helpers');
 
 const registrationWizard = new Scenes.WizardScene(
     'registrationWizard',
@@ -58,7 +59,7 @@ const registrationWizard = new Scenes.WizardScene(
         };
 
         try {
-            await DB.saveUser(userData.telegram_id, userData.phone_number, userData.first_name, userData.username, userData.band_name);
+            await DB.saveUser(userData);
             
             if (process.env.SPREADSHEET_ID) {
                 await Sheets.saveUser(userData);
@@ -68,6 +69,10 @@ const registrationWizard = new Scenes.WizardScene(
                 `🎉 Реєстрацію завершено!\n\nЛаскаво просимо, ${ctx.from.first_name} (${bandName})!`,
                 KB.getMainMenu(false) 
             );
+
+            const usernameText = ctx.from.username ? `@${ctx.from.username}` : 'без юзернейму';
+            const newUserMsg = `🆕 НОВИЙ КОРИСТУВАЧ\n\n👤 ${ctx.from.first_name}\n🔗 ${usernameText}\n🆔 <code>${ctx.from.id}</code>\n📞 ${ctx.wizard.state.phone}\n🎵 ${bandName}`;
+            await notifyAdmins(ctx.telegram, newUserMsg, { parse_mode: 'HTML' });
 
         } catch (error) {
             console.error('Помилка реєстрації:', error);

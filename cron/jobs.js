@@ -10,6 +10,13 @@ try {
     console.log('⚠️ Google Calendar Service не підключено (у cron).');
 }
 
+const findConflictingSlots = async (roomId, dateStr, slots) => {
+    const dbSlots = await DB.getBookedSlots(dateStr, roomId);
+    const googleSlots = GCal ? await GCal.getBusySlots(roomId, dateStr) : [];
+    const busySlots = new Set([...dbSlots, ...googleSlots]);
+    return slots.filter(slot => busySlots.has(slot));
+};
+
 /**
  * Ініціалізація всіх фонових завдань
  * @param {Telegraf} bot - екземпляр бота для відправки повідомлень
@@ -84,6 +91,75 @@ const initCronJobs = (bot) => {
         } catch (e) {
             console.error('❌ Помилка при синхронізації Google Calendar:', e);
         }
+    });
+
+    // ==========================
+    // ♾️ 3. АВТОПОДОВЖЕННЯ РЕГУЛЯРНИХ СЕРІЙ (Щодня о 03:15)
+    // ==========================
+    cron.schedule('15 3 * * *', async () => {
+        try {
+            const seriesList = await DB.getAutoRenewSeries();
+            if (!seriesList.length) return;
+
+            const horizon = DateTime.now().setZone('Europe/Kiev').plus({ weeks: 24 }).startOf('day');
+
+            for (const series of seriesList) {
+                let nextDate = DateTime.fromISO(series.last_date).plus({ weeks: 1 }).startOf('day');
+                const slots = String(series.time_slots || '').split(',').filter(Boolean);
+                const createdDates = [];
+                const skippedDates = [];
+
+                while (nextDate <= horizon) {
+                    const dateStr = nextDate.toISODate();
+                    const conflicts = await findConflictingSlots(series.room_id, dateStr, slots);
+
+                    if (conflicts.length === 0) {
+                        let googleEventId = null;
+                        if (GCal) {
+                            googleEventId = await GCal.createEvent(series.room_id, dateStr, slots, {
+                                name: series.client_name,
+                                phone: 'Бронь Адміна',
+                                band: (series.band_name || '-') + (series.is_resident_booking ? ' (Резидент)' : ''),
+                                equipment: ''
+                            });
+                        }
+
+                        await DB.saveBooking(
+                            0,
+                            series.room_id,
+                            series.room_name,
+                            dateStr,
+                            slots,
+                            '',
+                            googleEventId,
+                            series.series_id,
+                            series.client_name,
+                            series.band_name,
+                            true,
+                            !!series.is_resident_booking
+                        );
+                        createdDates.push(dateStr);
+                    } else {
+                        skippedDates.push(`${dateStr} (${conflicts.join(', ')})`);
+                    }
+
+                    nextDate = nextDate.plus({ weeks: 1 });
+                }
+
+                if (createdDates.length > 0 || skippedDates.length > 0) {
+                    let adminMsg = `♾️ *Автоподовження серії*\n👤 ${series.client_name || 'Невідомий'}\n🚪 ${series.room_name}\n⏰ ${series.time_slots}`;
+                    if (createdDates.length > 0) adminMsg += `\n\n✅ Додано дати:\n${createdDates.join('\n')}`;
+                    if (skippedDates.length > 0) adminMsg += `\n\n⚠️ Пропущено дати:\n${skippedDates.join('\n')}`;
+                    try {
+                        await bot.telegram.sendMessage(process.env.ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                }
+            }
+        } catch (e) {
+            console.error('❌ Помилка автоподовження серій:', e);
+        }
+    }, {
+        timezone: 'Europe/Kiev'
     });
 
     console.log('✅ Cron-завдання ініціалізовано.');

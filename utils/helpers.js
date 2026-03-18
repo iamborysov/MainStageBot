@@ -44,5 +44,33 @@ async function checkIsAdmin(ctx) {
     }
 }
 
-// ВАЖЛИВО: Експортуємо обидві функції
-module.exports = { generateUserCalendarLink, checkIsAdmin };
+async function getAdminIds() {
+    const ids = new Set();
+    if (process.env.ADMIN_ID) ids.add(String(process.env.ADMIN_ID));
+
+    try {
+        const users = await DB.getAllUsers();
+        for (const user of users || []) {
+            if (user && user.is_admin === 1 && !user.is_banned) {
+                ids.add(String(user.telegram_id));
+            }
+        }
+    } catch (e) {
+        // fallback: лише ADMIN_ID
+    }
+
+    return Array.from(ids);
+}
+
+async function notifyAdmins(telegram, text, extra = {}) {
+    const adminIds = await getAdminIds();
+    for (const adminId of adminIds) {
+        try {
+            await telegram.sendMessage(adminId, text, extra);
+        } catch (e) {
+            // ігноруємо, якщо конкретному адміну не вдалося доставити
+        }
+    }
+}
+
+module.exports = { generateUserCalendarLink, checkIsAdmin, getAdminIds, notifyAdmins };

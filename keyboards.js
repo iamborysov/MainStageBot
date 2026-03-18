@@ -4,7 +4,7 @@ const { DateTime } = require('luxon');
 const getMainMenu = (isAdmin) => {
     let buttons = [
         ['📅 Розклад', '🎸 Опис студії'],
-        ['📅 Мої бронювання', '💸 Вартість репетицій'],
+        ['✅ Мої бронювання', '💸 Вартість репетицій'],
         ['📒 Контакти', '🔧 Профіль'],
         ['📣 Соцмережі']
     ];
@@ -18,7 +18,8 @@ const adminMenu = Markup.keyboard([
     ['➕ Створити бронь', '🔄 Регулярні броні'],
     ['⬛ Чорний список', '🎓 Резиденти'],
     ['👮‍♂️ Адміністратори', '🏠 Налаштування кімнат'],
-    ['📨 Розсилка', '🏠 Головне меню']
+    ['🔍 Пошук користувача', '📨 Розсилка'],
+    ['🏠 Головне меню']
 ]).resize();
 
 const roomSelector = (rooms, actionPrefix) => {
@@ -58,6 +59,11 @@ const backToDescBtn = Markup.inlineKeyboard([
     [Markup.button.callback('↩️ Назад', 'back_to_desc_rooms')]
 ]);
 
+const roomInfoActions = (roomId, backAction) => Markup.inlineKeyboard([
+    [Markup.button.callback('➡️ Забронювати час', `book_${roomId}`)],
+    [Markup.button.callback('↩️ Назад', backAction)]
+]);
+
 const bookingList = (bookings) => {
     const buttons = bookings.map(b => {
         return [Markup.button.callback(
@@ -71,7 +77,8 @@ const bookingList = (bookings) => {
 const blacklistMenu = (users) => {
     const buttons = users.map(u => {
         const status = u.is_banned ? '🟢 Розблокувати' : '🔴 Заблокувати';
-        const rowText = `${u.first_name} ${u.band_name ? `(${u.band_name})` : ''} - ${status}`;
+        const gurtText = u.band_name ? ` (${u.band_name})` : '';
+        const rowText = `${u.first_name}${gurtText} [ID: ${u.telegram_id}] - ${status}`;
         return [Markup.button.callback(rowText, `ban_toggle_${u.telegram_id}`)];
     });
     return Markup.inlineKeyboard(buttons);
@@ -81,7 +88,8 @@ const adminListMenu = (users, superAdminId) => {
     const buttons = users.map(u => {
         if (String(u.telegram_id) === String(superAdminId)) return null;
         const isAdm = u.is_admin ? '✅ Адмін' : '👤 Юзер';
-        const rowText = `${u.first_name} (${u.phone_number}) - ${isAdm}`;
+        const gurtText = u.band_name ? ` (${u.band_name})` : '';
+        const rowText = `${u.first_name}${gurtText} [ID: ${u.telegram_id}] - ${isAdm}`;
         return [Markup.button.callback(rowText, `admin_toggle_${u.telegram_id}`)];
     }).filter(b => b !== null);
     return Markup.inlineKeyboard(buttons);
@@ -90,7 +98,8 @@ const adminListMenu = (users, superAdminId) => {
 const residentListMenu = (users) => {
     const buttons = users.map(u => {
         const isRes = u.is_resident ? '✅ Резидент' : '👤 Звичайний';
-        const rowText = `${u.first_name} (${u.band_name || 'без гурта'}) - ${isRes}`;
+        const gurtText = u.band_name ? ` (${u.band_name})` : ' (без гурта)';
+        const rowText = `${u.first_name}${gurtText} [ID: ${u.telegram_id}] - ${isRes}`;
         return [Markup.button.callback(rowText, `resident_toggle_${u.telegram_id}`)];
     });
     return Markup.inlineKeyboard(buttons);
@@ -115,7 +124,9 @@ const equipmentSelector = (selectedItems = []) => {
         return [Markup.button.callback(text, `equip_toggle_${item.id}`)];
     });
 
-    const confirmText = selectedItems.length > 0 ? '✅ Готово (Далі)' : '❌ Нічого не треба (Далі)';
+    const confirmText = selectedItems.length > 0
+        ? '✅ Готово (Підтвердити бронь)'
+        : '➖ Не треба (Підтвердити бронь)';
     buttons.push([Markup.button.callback(confirmText, 'confirm_equipment')]);
     
     buttons.push([Markup.button.callback('↩️ Назад до часу', 'back_to_time_grid')]);
@@ -205,7 +216,7 @@ const createTimeGrid = (bookedSlots, selectedSlots) => {
         buttons.push(row);
     }
     buttons.push([Markup.button.callback('↪️ Назад', 'back_to_calendar')]);
-    if (selectedSlots.length > 0) buttons.push([Markup.button.callback('➡️ Далі (До обладнання)', 'to_equipment')]);
+    if (selectedSlots.length > 0) buttons.push([Markup.button.callback('➡️ Забронювати', 'to_equipment')]);
     
     return Markup.inlineKeyboard(buttons);
 };
@@ -214,11 +225,34 @@ const boolKeyboard = Markup.inlineKeyboard([
     [Markup.button.callback('✅ Так (Резидент)', 'adm_res_true'), Markup.button.callback('❌ Ні (Звичайний)', 'adm_res_false')]
 ]);
 
+const residentDecisionKeyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Так, резидентська', 'set_res_yes')],
+    [Markup.button.callback('❌ Ні, звичайна', 'set_res_no')]
+]);
+
+const confirmBookingKeyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Підтвердити', 'confirm_user_yes')],
+    [Markup.button.callback('↩️ Обрати іншого користувача', 'confirm_user_no')]
+]);
+
 const recurringKeyboard = Markup.inlineKeyboard([
     [Markup.button.callback('1️⃣ Тільки на цю дату', 'adm_rec_1')],
     [Markup.button.callback('🔄 На місяць (4 тижні)', 'adm_rec_4')],
     [Markup.button.callback('♾️ До скасування (6 міс.)', 'adm_rec_24')]
 ]);
+
+const recurringPreviewKeyboard = (hasAvailableDates, autoRenew = false) => {
+    const buttons = [];
+
+    if (hasAvailableDates) {
+        const confirmLabel = autoRenew ? '✅ Створити і увімкнути автоподовження' : '✅ Створити серію';
+        buttons.push([Markup.button.callback(confirmLabel, 'adm_rec_confirm')]);
+    }
+
+    buttons.push([Markup.button.callback('↩️ Назад до вибору повторення', 'adm_rec_back')]);
+    buttons.push([Markup.button.callback('❌ Скасувати', 'adm_rec_cancel')]);
+    return Markup.inlineKeyboard(buttons);
+};
 
 // --- ОНОВЛЕНО: Відображаємо імена в списку серій ---
 const seriesList = (series) => {
@@ -230,7 +264,8 @@ const seriesList = (series) => {
         
         // Формуємо рядок: "Ім'я (Гурт) | Пн 19:00 | Room"
         const clientInfo = s.client_name ? `${s.client_name} ${s.band_name ? `(${s.band_name})` : ''}` : 'Невідомий';
-        const info = `${clientInfo} | ${dayOfWeek} ${s.time_slots} | ${s.room_name}`;
+        const autoRenewInfo = s.auto_renew ? ' ♾️' : '';
+        const info = `${clientInfo}${autoRenewInfo} | ${dayOfWeek} ${s.time_slots} | ${s.room_name}`;
         
         return [Markup.button.callback(`❌ Скасувати: ${info}`, `cancel_series_${s.series_id}`)];
     });
@@ -242,8 +277,8 @@ const seriesList = (series) => {
 module.exports = { 
     getMainMenu, adminMenu, roomSelector, adminRoomList, 
     bookingList, blacklistMenu, adminListMenu, residentListMenu,
-    skipBtn, socialButtons, editProfileBtn, backToDescBtn,
+    skipBtn, socialButtons, editProfileBtn, backToDescBtn, roomInfoActions,
     createCalendar, createTimeGrid, broadcastConfirmBtn,
     equipmentSelector,
-    boolKeyboard, recurringKeyboard, seriesList
+    boolKeyboard, residentDecisionKeyboard, confirmBookingKeyboard, recurringKeyboard, recurringPreviewKeyboard, seriesList
 };

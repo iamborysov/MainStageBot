@@ -3,7 +3,7 @@ const { Composer, Markup } = require('telegraf');
 const { DateTime } = require('luxon');
 const DB = require('../database');
 const KB = require('../keyboards');
-const { generateUserCalendarLink, checkIsAdmin } = require('../utils/helpers');
+const { generateUserCalendarLink, checkIsAdmin, notifyAdmins } = require('../utils/helpers');
 const Sheets = require('../sheets_service');
 
 // Підключаємо GCal
@@ -16,10 +16,247 @@ const composer = new Composer();
 composer.hears('✅ Мої бронювання', async (ctx) => {
     const bookings = await DB.getUserBookings(ctx.from.id);
     if (!bookings.length) return ctx.reply('Активних бронювань немає.');
-    ctx.reply('Ваші бронювання (натисніть для скасування):', KB.bookingList(bookings));
+    
+    // Групуємо броні: серійні окремо
+    const groupedBookings = {};
+    const standaloneBookings = [];
+    
+    for (const booking of bookings) {
+        if (booking.series_id) {
+            if (!groupedBookings[booking.series_id]) {
+                groupedBookings[booking.series_id] = [];
+            }
+            groupedBookings[booking.series_id].push(booking);
+        } else {
+            standaloneBookings.push(booking);
+        }
+    }
+    
+    // Будуємо текст и клавіатуру
+    let text = '✅ *Ваші бронювання*\n\n';
+    const buttons = [];
+    
+    // Звичайні броні
+    for (const booking of standaloneBookings) {
+        buttons.push([Markup.button.callback(
+            `❌ ${booking.date} | ${booking.time_slots} | ${booking.room_name}`, 
+            `cancel_booking_${booking.id}`
+        )]);
+    }
+    
+    // Серійні броні (групи)
+    for (const [seriesId, seriesBookings] of Object.entries(groupedBookings)) {
+        const firstDate = seriesBookings[0].date;
+        const count = seriesBookings.length;
+        buttons.push([Markup.button.callback(
+            `🔄 Серія (${count} дат): ${firstDate}... | ${seriesBookings[0].room_name}`, 
+            `series_manage_${seriesId}`
+        )]);
+    }
+    
+    ctx.reply(text, Markup.inlineKeyboard(buttons));
 });
 
-// --- СКАСУВАННЯ БРОНЮВАННЯ ---
+// --- УПРАВЛІННЯ СЕРІЙНОЮ БРНЮ ---
+composer.action(/series_manage_(.+)/, async (ctx) => {
+    const seriesId = ctx.match[1];
+    const seriesBookings = await DB.getSeriesBookings(seriesId);
+    
+    if (!seriesBookings.length) return ctx.answerCbQuery('Серія не знайдена', { show_alert: true });
+    
+    // Перевіримо що це бронь користувача
+    if (seriesBookings[0].user_id !== ctx.from.id) {
+        return ctx.answerCbQuery('Ви не маєте доступу до цієї серії', { show_alert: true });
+    }
+    
+    // Будуємо список дат
+    let text = `🔄 *Управління серією*\n\n${seriesBookings[0].room_name}\n⏰ ${seriesBookings[0].time_slots}\n\n📅 Доступні дати:\n`;
+    
+    const buttons = [];
+    for (const booking of seriesBookings) {
+        buttons.push([Markup.button.callback(
+            `❌ ${booking.date}`, 
+            `cancel_series_date_${booking.id}`
+        )]);
+    }
+    
+    // Кнопка для скасування всієї серії
+    buttons.push([Markup.button.callback('🗑️ Скасувати всю серію', `cancel_all_series_${seriesId}`)]);
+    buttons.push([Markup.button.callback('⬅️ Назад до броней', 'back_to_bookings')]);
+    
+    try {
+        await ctx.editMessageText(text, Markup.inlineKeyboard(buttons));
+    } catch (e) {
+        await ctx.reply(text, Markup.inlineKeyboard(buttons));
+    }
+});
+
+// --- СКАСУВАННЯ ОДНІЄЇ ДАТИ З СЕРІЇ ---
+composer.action(/cancel_series_date_(\d+)/, async (ctx) => {
+    const bookingId = parseInt(ctx.match[1], 10);
+    if (!Number.isFinite(bookingId)) {
+        return ctx.answerCbQuery('Некоректний ID бронювання', { show_alert: true });
+    }
+
+    try {
+        const booking = await DB.getBookingById(bookingId);
+        if (!booking) return ctx.answerCbQuery('Бронювання не знайдено', { show_alert: true });
+        if (String(booking.user_id) !== String(ctx.from.id)) {
+            return ctx.answerCbQuery('Ви не маєте доступу', { show_alert: true });
+        }
+
+        // Перевірка 12-годинного вікна
+        const slots = String(booking.time_slots || '').split(',').filter(Boolean);
+        const startHours = slots
+            .map(s => parseInt(String(s).split('-')[0], 10))
+            .filter(n => Number.isFinite(n));
+
+        if (startHours.length > 0) {
+            const earliestHour = Math.min(...startHours);
+            const bookingStart = DateTime.fromISO(`${booking.date}T${String(earliestHour).padStart(2, '0')}:00:00`, { zone: 'Europe/Kiev' });
+            const now = DateTime.now().setZone('Europe/Kiev');
+            const hoursLeft = bookingStart.diff(now, 'hours').hours;
+
+            if (hoursLeft < 12) {
+                return ctx.answerCbQuery('Скасування недоступне менш ніж за 12 годин до репетиції.', { show_alert: true });
+            }
+        }
+
+        await ctx.answerCbQuery('⏳ Скасовую дату...');
+
+        if (GCal && booking.google_event_id) {
+            try {
+                await GCal.deleteEvent(booking.room_id, booking.google_event_id);
+            } catch (e) {
+                // Навіть якщо GCal недоступний, локальне скасування має відбутися.
+            }
+        }
+
+        await DB.cancelBooking(bookingId);
+        const afterCancel = await DB.getBookingById(bookingId);
+        if (!afterCancel || afterCancel.status !== 'cancelled') {
+            await ctx.reply('❌ Не вдалося скасувати обрану репетицію. Спробуйте ще раз.');
+            return;
+        }
+
+        await ctx.reply(`✅ Видалено репетицію: ${booking.date} | ${booking.time_slots} | ${booking.room_name}`);
+
+        const actor = await DB.getUser(ctx.from.id);
+        const actorName = actor ? `${actor.first_name} (${actor.phone_number || '-'})` : `ID ${ctx.from.id}`;
+        await notifyAdmins(ctx.telegram, `⚠️ СКАСУВАННЯ ОДНІЄЇ ДАТИ СЕРІЇ\n\n👤 ${actorName}\n📅 <b>${booking.date}</b>\n⏰ ${booking.time_slots}\n🚪 <b>${booking.room_name}</b>`, { parse_mode: 'HTML' });
+
+        // Оновлюємо список серії
+        const seriesBookings = await DB.getSeriesBookings(booking.series_id);
+        if (seriesBookings.length === 0) {
+            await ctx.editMessageText('✅ У серії не лишилось активних дат.');
+        } else {
+            const text = `🔄 *Управління серією*\n\n${seriesBookings[0].room_name}\n⏰ ${seriesBookings[0].time_slots}\n\n📅 Доступні дати:\n`;
+            const buttons = [];
+            for (const b of seriesBookings) {
+                buttons.push([Markup.button.callback(`❌ ${b.date}`, `cancel_series_date_${b.id}`)]);
+            }
+            buttons.push([Markup.button.callback('🗑️ Скасувати всю серію', `cancel_all_series_${booking.series_id}`)]);
+            buttons.push([Markup.button.callback('⬅️ Назад до броней', 'back_to_bookings')]);
+            await ctx.editMessageText(text, Markup.inlineKeyboard(buttons));
+        }
+    } catch (error) {
+        console.error('[ERROR] cancel_series_date:', error);
+        await ctx.reply('❌ Сталася помилка при скасуванні конкретної дати.');
+    }
+});
+
+// --- СКАСУВАННЯ ВСІЄЇ СЕРІЇ ---
+composer.action(/cancel_all_series_(\d+)/, async (ctx) => {
+    const seriesId = ctx.match[1];
+    const seriesBookings = await DB.getSeriesBookings(seriesId);
+    
+    if (!seriesBookings.length) return ctx.answerCbQuery('Серія не знайдена', { show_alert: true });
+    if (String(seriesBookings[0].user_id) !== String(ctx.from.id)) return ctx.answerCbQuery('Ви не маєте доступу', { show_alert: true });
+
+    // Спочатку перевіряємо всю серію: якщо хоч одна дата < 12 годин — не скасовуємо нічого
+    const protectedDates = [];
+    for (const booking of seriesBookings) {
+        const slots = String(booking.time_slots || '').split(',').filter(Boolean);
+        const startHours = slots
+            .map(s => parseInt(String(s).split('-')[0], 10))
+            .filter(n => Number.isFinite(n));
+
+        if (startHours.length > 0) {
+            const earliestHour = Math.min(...startHours);
+            const bookingStart = DateTime.fromISO(`${booking.date}T${String(earliestHour).padStart(2, '0')}:00:00`, { zone: 'Europe/Kiev' });
+            const now = DateTime.now().setZone('Europe/Kiev');
+            const hoursLeft = bookingStart.diff(now, 'hours').hours;
+
+            if (hoursLeft < 12) {
+                protectedDates.push(`${booking.date} (${booking.time_slots})`);
+            }
+        }
+    }
+
+    if (protectedDates.length > 0) {
+        return ctx.answerCbQuery(`⛔ Не можна скасувати серію: є репетиції менш ніж за 12 годин.`, { show_alert: true });
+    }
+
+    await ctx.answerCbQuery('⏳ Скасовую всю серію...');
+
+    let cancelledCount = 0;
+    for (const booking of seriesBookings) {
+        if (GCal && booking.google_event_id) {
+            try { await GCal.deleteEvent(booking.room_id, booking.google_event_id); } catch (e) {}
+        }
+        await DB.cancelBooking(booking.id);
+        const afterCancel = await DB.getBookingById(booking.id);
+        if (afterCancel && afterCancel.status === 'cancelled') cancelledCount++;
+    }
+
+    await ctx.editMessageText(`✅ Скасовано всю серію: видалено ${cancelledCount} з ${seriesBookings.length} дат.`);
+    await ctx.reply('Що робимо далі?', KB.getMainMenu());
+
+    const actor = await DB.getUser(ctx.from.id);
+    const actorName = actor ? `${actor.first_name} (${actor.phone_number || '-'})` : `ID ${ctx.from.id}`;
+        await notifyAdmins(ctx.telegram, `⚠️ СКАСУВАННЯ СЕРІЇ КОРИСТУВАЧЕМ\n\n👤 ${actorName}\n🆔 Серія: <code>${seriesId}</code>\n📅 Скасовано дат: ${cancelledCount}`, { parse_mode: 'HTML' });
+});
+
+// --- ПОВЕРНЕННЯ ДО БРОНЕЙ ---
+composer.action('back_to_bookings', async (ctx) => {
+    const bookings = await DB.getUserBookings(ctx.from.id);
+    if (!bookings.length) return ctx.editMessageText('Активних бронювань немає.');
+    
+    const groupedBookings = {};
+    const standaloneBookings = [];
+    
+    for (const booking of bookings) {
+        if (booking.series_id) {
+            if (!groupedBookings[booking.series_id]) {
+                groupedBookings[booking.series_id] = [];
+            }
+            groupedBookings[booking.series_id].push(booking);
+        } else {
+            standaloneBookings.push(booking);
+        }
+    }
+    
+    let text = '✅ *Ваші бронювання*\n\n';
+    const buttons = [];
+    
+    for (const booking of standaloneBookings) {
+        buttons.push([Markup.button.callback(
+            `❌ ${booking.date} | ${booking.time_slots} | ${booking.room_name}`, 
+            `cancel_booking_${booking.id}`
+        )]);
+    }
+    
+    for (const [seriesId, seriesBookings] of Object.entries(groupedBookings)) {
+        const firstDate = seriesBookings[0].date;
+        const count = seriesBookings.length;
+        buttons.push([Markup.button.callback(
+            `🔄 Серія (${count} дат): ${firstDate}... | ${seriesBookings[0].room_name}`, 
+            `series_manage_${seriesId}`
+        )]);
+    }
+    
+    await ctx.editMessageText(text, Markup.inlineKeyboard(buttons));
+});
 composer.action(/cancel_booking_(.+)/, async (ctx) => {
     const bookingId = ctx.match[1];
     const booking = await DB.getBookingById(bookingId);
@@ -28,6 +265,25 @@ composer.action(/cancel_booking_(.+)/, async (ctx) => {
 
     const isAdmin = await checkIsAdmin(ctx);
     if (!isAdmin && booking.user_id !== ctx.from.id) return ctx.reply('Це не ваше бронювання.');
+
+    // Для користувача: заборона скасування менш ніж за 12 годин до репетиції
+    if (!isAdmin) {
+        const slots = String(booking.time_slots || '').split(',').filter(Boolean);
+        const startHours = slots
+            .map(s => parseInt(String(s).split('-')[0], 10))
+            .filter(n => Number.isFinite(n));
+
+        if (startHours.length > 0) {
+            const earliestHour = Math.min(...startHours);
+            const bookingStart = DateTime.fromISO(`${booking.date}T${String(earliestHour).padStart(2, '0')}:00:00`, { zone: 'Europe/Kiev' });
+            const now = DateTime.now().setZone('Europe/Kiev');
+            const hoursLeft = bookingStart.diff(now, 'hours').hours;
+
+            if (hoursLeft < 12) {
+                return ctx.answerCbQuery('Скасування недоступне менш ніж за 12 годин до репетиції.', { show_alert: true });
+            }
+        }
+    }
 
     if (GCal && booking.google_event_id) {
         await GCal.deleteEvent(booking.room_id, booking.google_event_id);
@@ -40,11 +296,14 @@ composer.action(/cancel_booking_(.+)/, async (ctx) => {
         if (booking.user_id !== 0 && booking.user_id !== ctx.from.id) {
             try {
                 await ctx.telegram.sendMessage(booking.user_id, 
-                    `⚠️ *Ваше бронювання скасовано адміністратором!*\n\n📅 Дата: ${booking.date}\n⏰ Час: ${booking.time_slots}\n🚪 Кімната: ${booking.room_name}`, 
-                    { parse_mode: 'Markdown' }
+                    `⚠️ Ваше бронювання скасовано адміністратором.\n\n📅 Дата: ${booking.date}\n⏰ Час: ${booking.time_slots}\n🚪 Кімната: ${booking.room_name}`
                 );
             } catch (e) {}
         }
+
+        const actor = await DB.getUser(ctx.from.id);
+        const actorName = actor ? `${actor.first_name} (${actor.phone_number || '-'})` : `ID ${ctx.from.id}`;
+        await notifyAdmins(ctx.telegram, `⚠️ СКАСУВАННЯ БРОНЮВАННЯ АДМІНОМ\n\n👤 Адмін: ${actorName}\n📅 <b>${booking.date}</b>\n⏰ ${booking.time_slots}\n🚪 <b>${booking.room_name}</b>`, { parse_mode: 'HTML' });
     } else {
         await ctx.reply(`❌ Бронь на ${booking.date} скасовано.`);
         const bookings = await DB.getUserBookings(ctx.from.id);
@@ -52,12 +311,13 @@ composer.action(/cancel_booking_(.+)/, async (ctx) => {
         else await ctx.editMessageText('Активних бронювань немає.');
         
         const user = await DB.getUser(booking.user_id);
-        const userName = user ? `${user.first_name} (${user.phone_number})` : 'Невідомий';
+        const residentLabel = user && user.is_resident ? ' 🎓 (Резидент)' : '';
+        const userName = user ? `${user.first_name} (${user.phone_number})${residentLabel}` : 'Невідомий';
         const equipText = booking.equipment ? `\n🎸 Оренда: ${booking.equipment}` : '';
-        
-        await ctx.telegram.sendMessage(process.env.ADMIN_ID, 
-            `⚠️ *СКАСУВАННЯ БРОНЮВАННЯ*\n\n👤 Хто: ${userName}\n📅 Дата: ${booking.date}\n⏰ Час: ${booking.time_slots}\n🚪 Кімната: ${booking.room_name}${equipText}`,
-            { parse_mode: 'Markdown' }
+
+        await notifyAdmins(ctx.telegram, 
+            `⚠️ СКАСУВАННЯ БРОНЮВАННЯ КОРИСТУВАЧЕМ\n\n👤 ${userName}\n📅 <b>${booking.date}</b>\n⏰ ${booking.time_slots}\n🚪 <b>${booking.room_name}</b>${equipText}`,
+            { parse_mode: 'HTML' }
         );
     }
 });
@@ -106,6 +366,7 @@ composer.action('back_to_calendar', async (ctx) => {
 
 composer.action('back_to_rooms', async (ctx) => {
     const rooms = await DB.getRooms(true);
+    ctx.session.booking = {};
     await ctx.editMessageText('Обери кімнату 🚪', KB.roomSelector(rooms, 'book'));
 });
 
@@ -175,7 +436,7 @@ composer.action('to_equipment', async (ctx) => {
     }
 
     if (!ctx.session.booking.equipment) ctx.session.booking.equipment = [];
-    await ctx.editMessageText('🎸 Чи потрібне додаткове обладнання? (100 грн/год)', KB.equipmentSelector(ctx.session.booking.equipment));
+    await ctx.editMessageText('🎸 Чи потрібне додаткові обладнання? (100 грн/год)', KB.equipmentSelector(ctx.session.booking.equipment));
 });
 
 composer.action(/equip_toggle_(.+)/, async (ctx) => {
@@ -253,24 +514,23 @@ if (process.env.SPREADSHEET_ID) {
 
     const isAdmin = await checkIsAdmin(ctx);
     
-    let replyText = `✅ Бронь підтверджено!\nКімната: ${roomName}\nДата: ${date}\nЧас: ${slots.join(', ')}`;
+    let replyText = `Юху 🤗\nРепетиція підтверджена! ✨\n\nКімната: <b>${roomName}</b>\nДата: <b>${date}</b>\nЧас: <b>${slots.join(', ')}</b>`;
     if (equipString) replyText += `\n🎸 Оренда: ${equipString}`;
     replyText += `\n\n📍 Як нас знайти: https://is.gd/xnAFTa\n📞 Телефон: +38 099 682 97 21\n🏠 Адреса: Дніпровський Узвіз, 1`;
 
     const calendarLink = generateUserCalendarLink(date, slots, roomName, equipString);
     const finalKeyboard = Markup.inlineKeyboard([[Markup.button.url('➕ Додати в Google Calendar', calendarLink)]]);
     
-    await ctx.reply(replyText, { ...finalKeyboard, disable_web_page_preview: true });
+    await ctx.reply(replyText, { ...finalKeyboard, parse_mode: 'HTML', disable_web_page_preview: true });
     await ctx.reply('Що робимо далі?', KB.getMainMenu(isAdmin));
 
-    const userMention = `[${user.first_name}](tg://user?id=${user.telegram_id})`;
     const usernameText = user.username ? `@${user.username}` : 'без юзернейму';
-    const userIdCode = `\`${user.telegram_id}\``;
-    
-await ctx.telegram.sendMessage(process.env.ADMIN_ID, 
-        `🆕 НОВА БРОНЬ!\n🚪 ${roomName}\n📅 ${date}\n⏰ ${slots.join(', ')}\n\n👤 [${user.first_name}](tg://user?id=${user.telegram_id})\n🔗 ${user.username ? `@${user.username}` : 'без юзернейму'}\n🆔 \`${user.telegram_id}\`\n📞 ${user.phone_number}\n🎵 ${user.band_name || '-'}${user.is_resident ? ' 🎓' : ''}${equipString ? `\n\n🎸 Оренда: ${equipString}` : ''}`,
+
+    await notifyAdmins(
+        ctx.telegram,
+        `🆕 НОВЕ БРОНЮВАННЯ ВІД КОРИСТУВАЧА\n\n🚪 <b>${roomName}</b>\n📅 <b>${date}</b>\n⏰ ${slots.join(', ')}\n👤 ${user.first_name}\n🔗 ${usernameText}\n🆔 <code>${user.telegram_id}</code>\n📞 ${user.phone_number}\n🎵 ${user.band_name || '-'}${user.is_resident ? ' 🎓 (Резидент)' : ''}${equipString ? `\n🎸 Оренда: ${equipString}` : ''}`,
         {
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             ...Markup.inlineKeyboard([[Markup.button.callback('❌ Скасувати', `cancel_booking_${bookingId}`)]])
         }
     );

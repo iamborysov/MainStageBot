@@ -43,20 +43,36 @@ bot.use(async (ctx, next) => {
     return next();
 });
 
-// 6. Підключаємо контролери (логіку бота)
+// 6. Перевірка реєстрації (до всіх контролерів)
+bot.use(async (ctx, next) => {
+    if (!ctx.from) return next();
+    // Пропускаємо якщо юзер вже всередині сцени (щоб не переривати реєстрацію)
+    if (ctx.session.__scenes?.current) return next();
+    // Пропускаємо /start — він завжди доступний
+    if (ctx.message?.text === '/start') return next();
+
+    const user = await DB.getUser(ctx.from.id);
+    if (!user || !user.phone_number) {
+        await ctx.reply('👋 Спочатку потрібно зареєструватись!');
+        return ctx.scene.enter('registrationWizard');
+    }
+    return next();
+});
+
+// 7. Підключаємо контролери (логіку бота)
 bot.use(userController);
 bot.use(adminController);
 bot.use(bookingController);
 
-// 7. Запускаємо фонові завдання (нагадування)
+// 8. Запускаємо фонові завдання (нагадування)
 initCronJobs(bot);
 
 bot.catch((err, ctx) => {
     console.error(`❌ Помилка для ${ctx.updateType}`, err);
 });
 
-// 8. Старт бота
-bot.launch().then(() => {
+// 9. Старт бота
+bot.launch({ dropPendingUpdates: true }).then(() => {
     console.log('✅ Bot started...');
 });
 

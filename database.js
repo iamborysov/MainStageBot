@@ -27,6 +27,8 @@ db.serialize(() => {
         series_id TEXT,
         client_name TEXT, 
         band_name TEXT,
+        auto_renew INTEGER DEFAULT 0,
+        is_resident_booking INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
@@ -47,6 +49,8 @@ db.serialize(() => {
         if (!rows.some(r => r.name === 'series_id')) db.run("ALTER TABLE bookings ADD COLUMN series_id TEXT");
         if (!rows.some(r => r.name === 'client_name')) db.run("ALTER TABLE bookings ADD COLUMN client_name TEXT");
         if (!rows.some(r => r.name === 'band_name')) db.run("ALTER TABLE bookings ADD COLUMN band_name TEXT");
+        if (!rows.some(r => r.name === 'auto_renew')) db.run("ALTER TABLE bookings ADD COLUMN auto_renew INTEGER DEFAULT 0");
+        if (!rows.some(r => r.name === 'is_resident_booking')) db.run("ALTER TABLE bookings ADD COLUMN is_resident_booking INTEGER DEFAULT 0");
     });
 
     db.all("PRAGMA table_info(users)", (err, rows) => {
@@ -153,6 +157,8 @@ const getRoom = (id) => {
 };
 
 const updateRoom = (id, field, value) => {
+    const allowedFields = ['name', 'description', 'price_image', 'is_active'];
+    if (!allowedFields.includes(field)) return Promise.reject(new Error(`Invalid field: ${field}`));
     return new Promise((resolve, reject) => {
         db.run(`UPDATE rooms SET ${field} = ? WHERE id = ?`, [value, id], (err) => {
             if (err) reject(err);
@@ -195,11 +201,11 @@ const getBookingBySlot = (date, roomId, slot) => {
     });
 };
 
-const saveBooking = (userId, roomId, roomName, date, slots, equipment, eventId = null, seriesId = null, clientName = null, bandName = null) => {
+const saveBooking = (userId, roomId, roomName, date, slots, equipment, eventId = null, seriesId = null, clientName = null, bandName = null, autoRenew = false, isResidentBooking = false) => {
     return new Promise((resolve, reject) => {
-        db.run(`INSERT INTO bookings (user_id, room_id, room_name, date, time_slots, equipment, google_event_id, series_id, client_name, band_name) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [userId, roomId, roomName, date, slots.join(','), equipment, eventId, seriesId, clientName, bandName], function(err) {
+        db.run(`INSERT INTO bookings (user_id, room_id, room_name, date, time_slots, equipment, google_event_id, series_id, client_name, band_name, auto_renew, is_resident_booking) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, roomId, roomName, date, slots.join(','), equipment, eventId, seriesId, clientName, bandName, autoRenew ? 1 : 0, isResidentBooking ? 1 : 0], function(err) {
             if (err) reject(err);
             resolve(this.lastID);
         });
@@ -208,7 +214,8 @@ const saveBooking = (userId, roomId, roomName, date, slots, equipment, eventId =
 
 const getUserBookings = (userId) => {
     return new Promise((resolve, reject) => {
-        db.all(`SELECT * FROM bookings WHERE user_id = ? AND status = 'active' ORDER BY date ASC`, [userId], (err, rows) => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        db.all(`SELECT * FROM bookings WHERE user_id = ? AND status = 'active' AND date >= ? ORDER BY date ASC`, [userId, todayStr], (err, rows) => {
             if (err) reject(err);
             resolve(rows);
         });
@@ -237,7 +244,7 @@ const getBookingById = (bookingId) => {
 const getActiveSeries = () => {
     return new Promise((resolve, reject) => {
         const sql = `
-            SELECT series_id, room_name, time_slots, date, client_name, band_name, count(*) as count 
+            SELECT series_id, room_name, time_slots, date, client_name, band_name, MAX(auto_renew) as auto_renew, count(*) as count 
             FROM bookings 
             WHERE series_id IS NOT NULL AND status = 'active'
             GROUP BY series_id
@@ -255,6 +262,31 @@ const getSeriesBookings = (seriesId) => {
         db.all("SELECT * FROM bookings WHERE series_id = ? AND status = 'active'", [seriesId], (err, rows) => {
             if (err) reject(err);
             resolve(rows);
+        });
+    });
+};
+
+const getAutoRenewSeries = () => {
+    return new Promise((resolve, reject) => {
+        const sql = `
+            SELECT 
+                series_id,
+                room_id,
+                room_name,
+                time_slots,
+                client_name,
+                band_name,
+                MAX(date) as last_date,
+                MAX(auto_renew) as auto_renew,
+                MAX(is_resident_booking) as is_resident_booking
+            FROM bookings
+            WHERE series_id IS NOT NULL AND status = 'active' AND auto_renew = 1
+            GROUP BY series_id
+            ORDER BY last_date ASC
+        `;
+        db.all(sql, (err, rows) => {
+            if (err) reject(err);
+            resolve(rows || []);
         });
     });
 };
@@ -285,11 +317,20 @@ const getFutureActiveBookingsWithEvent = () => {
     });
 };
 
+const deleteRoom = (id) => {
+    return new Promise((resolve, reject) => {
+        db.run("DELETE FROM rooms WHERE id = ?", [id], (err) => {
+            if (err) reject(err);
+            resolve();
+        });
+    });
+};
+
 module.exports = { 
     getUser, getAllUsers, saveUser, toggleBan, setAdminStatus, setResidentStatus,
-    getRooms, getRoom, updateRoom,
+    getRooms, getRoom, updateRoom, deleteRoom,
     getBookedSlots, getBookingsByDate, getBookingBySlot, 
     saveBooking, getUserBookings, cancelBooking, getBookingById,
-    getActiveSeries, getSeriesBookings, cancelSeries,
+    getActiveSeries, getSeriesBookings, getAutoRenewSeries, cancelSeries,
     getFutureActiveBookingsWithEvent
 };
